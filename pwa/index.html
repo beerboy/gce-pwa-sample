@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0ea5e9">
+  <title>GCE PWA + Service Worker サンプル</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon-192.png" sizes="192x192">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  
+  <!-- 📚 初学者向け学習ガイド -->
+  <!-- このファイルは ../README.md の Phase 3 で読むことを推奨します -->
+  <!-- PWA の基本概念は ../docs/PWA-GUIDE.md で先に学習してください -->
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Noto Sans JP, sans-serif; margin: 2rem; line-height: 1.6; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 1rem 1.25rem; margin: 1rem 0; }
+    .ok { color: #059669; }
+    .warn { color: #b45309; }
+    .muted { color: #6b7280; }
+    code { background: #f3f4f6; padding: .2rem .4rem; border-radius: 6px; }
+    button { padding: .5rem .9rem; border-radius: 10px; border: 1px solid #e5e7eb; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>GCE PWA + Service Worker サンプル</h1>
+  <p>このページは <strong>HTTPS</strong> で配信されているときに Service Worker が登録され、オフラインでも表示できます。</p>
+
+  <div class="card">
+    <h2>状態</h2>
+    <ul>
+      <li>オンライン: <span id="online" class="muted">判定中...</span></li>
+      <li>SW 登録: <span id="sw" class="muted">判定中...</span></li>
+      <li>キャッシュ: <span id="cache" class="muted">取得中...</span></li>
+    </ul>
+    <button id="clearCache">キャッシュを全削除</button>
+    <button onclick="forceUpdate()" style="margin-left: 8px; background-color: #dc2626; color: white;">強制更新（デバッグ用）</button>
+  </div>
+
+  <div class="card">
+    <h2>オフライン動作の確認</h2>
+    <p>このページを一度表示後、ネットワークを切断しても <code>/offline.html</code> にフォールバックして動作します。</p>
+  </div>
+
+  <div class="card">
+    <h2>バックグラウンド通信テスト</h2>
+    <p>オフラインでもデータ送信を予約し、オンライン復帰時に自動送信します。</p>
+    <form id="sync-form">
+      <input type="text" id="message-input" placeholder="送信するメッセージ" style="width: 100%; padding: 0.5rem; margin: 0.5rem 0; border: 1px solid #e5e7eb; border-radius: 6px;">
+      <button type="submit" id="sync-button">Background Syncで送信</button>
+    </form>
+    <p><strong>ページ表示状態:</strong> <span id="visibility-status" class="muted">判定中...</span></p>
+    <p><strong>Background Sync対応:</strong> <span id="sync-support" class="muted">判定中...</span></p>
+    <button onclick="testBackgroundCommunication()" style="background-color: #8b5cf6; color: white; margin-top: 8px;">バックグラウンド通信テスト</button>
+    <button onclick="checkPendingMessages()" style="background-color: #f59e0b; color: white; margin-left: 8px;">未送信メッセージ確認</button>
+    <button onclick="forceSyncNow()" style="background-color: #ef4444; color: white; margin-left: 8px;">強制同期実行</button>
+    <p><strong>送信履歴:</strong></p>
+    <ul id="sync-log"></ul>
+  </div>
+
+  <div class="card">
+    <h2>🔄 リアルタイムバックグラウンド通信テスト</h2>
+    <p>visibilityState=hiddenの時のタイマー制限とリアルタイム通信を検証します。</p>
+    <div style="margin: 1rem 0;">
+      <label>通信間隔: 
+        <select id="interval-select" style="margin-left: 8px;">
+          <option value="1000">1秒</option>
+          <option value="5000">5秒</option>
+          <option value="10000">10秒</option>
+          <option value="30000">30秒</option>
+          <option value="60000">1分</option>
+        </select>
+      </label>
+      <button id="start-realtime" style="margin-left: 16px; background-color: #059669; color: white;">🚀 開始</button>
+      <button onclick="showRealtimeStats()" style="margin-left: 8px; background-color: #f59e0b; color: white;">📊 統計表示</button>
+    </div>
+    <p><strong>⚠️ テスト手順:</strong></p>
+    <ol>
+      <li>「🚀 開始」をクリック → リアルタイム通信開始</li>
+      <li>タブを別タブに切り替え（バックグラウンド化）</li>
+      <li>30秒〜1分後にタブに戻る</li>
+      <li>ログで通信間隔の変化を確認</li>
+    </ol>
+    <p><strong>リアルタイム通信ログ:</strong></p>
+    <ul id="realtime-log" style="max-height: 300px; overflow-y: auto; border: 1px solid #e5e7eb; padding: 1rem; background: #f9fafb;"></ul>
+  </div>
+
+  <div class="card">
+    <h2>プッシュ通知のテスト</h2>
+    <p>下のボタンを押して、プッシュ通知の購読を許可してください。</p>
+    <button id="subscribe-button">プッシュ通知を購読する</button>
+    <h3>Subscription JSON (テスト用)</h3>
+    <pre><code id="subscription-json">(まだ購読していません)</code></pre>
+  </div>
+
+  <script>
+    // Online status
+    function updateOnline() {
+      const el = document.getElementById('online');
+      if (navigator.onLine) { el.textContent = 'オンライン'; el.className='ok'; }
+      else { el.textContent = 'オフライン'; el.className='warn'; }
+    }
+    window.addEventListener('online', updateOnline);
+    window.addEventListener('offline', updateOnline);
+    updateOnline();
+
+    // Register SW
+    (async () => {
+      const el = document.getElementById('sw');
+      if ('serviceWorker' in navigator) {
+        try {
+          const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+          el.textContent = '登録済み';
+          el.className = 'ok';
+          console.log('SW registered', reg);
+        } catch (e) {
+          el.textContent = '登録失敗: ' + (e && e.message ? e.message : e);
+          el.className = 'warn';
+        }
+      } else {
+        el.textContent = '非対応ブラウザ';
+        el.className = 'warn';
+      }
+    })();
+
+    // Show caches
+    (async () => {
+      const el = document.getElementById('cache');
+      if (!('caches' in window)) { el.textContent = '未対応'; return; }
+      try {
+        const keys = await caches.keys();
+        el.textContent = keys.length ? keys.join(', ') : 'なし';
+      } catch {
+        el.textContent = '取得失敗';
+      }
+    })();
+
+    // Clear caches
+    document.getElementById('clearCache').addEventListener('click', async () => {
+      if (!('caches' in window)) return;
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+      document.getElementById('cache').textContent = 'なし';
+      alert('キャッシュを削除しました');
+    });
+  </script>
+  <script src="/sw-update.js"></script>
+  <script src="/client.js"></script>
+  <script src="/background-sync.js"></script>
+  <script src="/realtime-background.js"></script>
+</body>
+</html>
